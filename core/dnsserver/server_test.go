@@ -388,6 +388,59 @@ func TestStacktrace(t *testing.T) {
 	}
 }
 
+// ctxRecordingPlugin records the deadline of the request context it is
+// handed, so tests can verify context propagation through the server.
+type ctxRecordingPlugin struct {
+	deadline time.Time
+	ok       bool
+	called   atomic.Bool
+}
+
+func (p *ctxRecordingPlugin) Name() string { return "ctx-recording" }
+
+func (p *ctxRecordingPlugin) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
+	p.deadline, p.ok = ctx.Deadline()
+	p.called.Store(true)
+	m := new(dns.Msg)
+	m.SetReply(r)
+	if err := w.WriteMsg(m); err != nil {
+		return dns.RcodeServerFailure, err
+	}
+	return dns.RcodeSuccess, nil
+}
+
+// TestServeDNSRequestContextReachesPluginChain verifies that the request
+// context — including its deadline — is passed to the plugin chain
+// unchanged. Downstream plugins rely on this contract to coordinate: the
+// cache plugin bounds background stale-verification refreshes with a
+// context deadline, and the forward plugin caps its upstream retry window
+// at the deadline it observes.
+func TestServeDNSRequestContextReachesPluginChain(t *testing.T) {
+	p := new(ctxRecordingPlugin)
+	s, err := NewServer("127.0.0.1:0", []*Config{testConfig("dns", p)})
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+
+	deadline := time.Now().Add(time.Minute)
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+
+	m := new(dns.Msg)
+	m.SetQuestion("example.com.", dns.TypeA)
+	s.ServeDNS(ctx, &test.ResponseWriter{}, m)
+
+	if !p.called.Load() {
+		t.Fatal("plugin chain was not invoked")
+	}
+	if !p.ok {
+		t.Fatal("plugin chain did not receive the request context deadline")
+	}
+	if !p.deadline.Equal(deadline) {
+		t.Fatalf("plugin chain saw deadline %v, expected %v", p.deadline, deadline)
+	}
+}
+
 func TestGracefulStopTimeout_Internal(t *testing.T) {
 	p := new(blockingPlugin)
 	cfg := testConfig("dns", p)

@@ -78,8 +78,12 @@ cache [TTL] [ZONES...] {
   In `immediate` mode, concurrent requests for the same expired entry dispatch at most one
   background refresh.
   **VERIFY_TIMEOUT** is only valid with `verify` and bounds how long the cache waits for the upstream
-  verify before falling back to the stale entry. The verify continues in the background and refreshes the
-  cache when it eventually succeeds, so subsequent queries see the fresh entry. The default of `0` means
+  verify before falling back to the stale entry. The verify continues in the background for one more
+  **VERIFY_TIMEOUT** interval (twice the timeout in total) and refreshes the cache if it succeeds in
+  that grace window, so subsequent queries see the fresh entry. The background verify is then canceled;
+  the cancellation propagates to downstream plugins, so a _forward_ plugin stops retrying an
+  unresponsive upstream instead of running its full retry window for a client that already received a
+  stale answer. The default of `0` means
   wait until the upstream's own timeout (the original `verify` behavior). Example: `serve_stale 1h verify 100ms`.
   **RESPONSE_TTL** sets the TTL returned with expired entries and defaults to `0`. RFC 8767 requires stale
   responses to use a TTL greater than zero and recommends `30s`. In `immediate` mode it follows the mode,

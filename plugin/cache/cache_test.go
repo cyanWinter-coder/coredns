@@ -1073,7 +1073,9 @@ func TestServeFromStaleCacheFetchVerify(t *testing.T) {
 func TestServeFromStaleCacheFetchVerifyTimeout(t *testing.T) {
 	// Verify that when verifyStaleTimeout is set and the upstream is slow,
 	// the client gets the stale entry within ~timeout, while the in-flight
-	// verify continues in the background and refreshes the cache.
+	// verify continues in the background and refreshes the cache. The
+	// background refresh is bounded by twice the verify timeout, so the
+	// slow upstream here answers inside that grace window.
 	c := New()
 	c.staleUpTo = 1 * time.Hour
 	c.verifyStale = true
@@ -1095,9 +1097,10 @@ func TestServeFromStaleCacheFetchVerifyTimeout(t *testing.T) {
 	// Move forward past the TTL so the entry is stale.
 	c.now = func() time.Time { return time.Now().Add(3 * time.Minute) }
 
-	// Swap in a slow backend that takes longer than the verify timeout.
+	// Swap in a slow backend that takes longer than the verify timeout but
+	// still answers within the background refresh grace window (2x timeout).
 	bgDone := make(chan struct{})
-	c.Next = slowTTLBackend(60, 200*time.Millisecond, bgDone)
+	c.Next = slowTTLBackend(60, 80*time.Millisecond, bgDone)
 
 	rec = dnstest.NewRecorder(&test.ResponseWriter{})
 	start := time.Now()

@@ -183,8 +183,12 @@ func (c *Cache) doRefresh(ctx context.Context, state request.Request, cw dns.Res
 // against verifyStaleTimeout. If the verify completes within the timeout and the
 // response is accepted by verifyStaleResponseWriter, the freshly cached entry is
 // served to the client and served is true. Otherwise served is false and the caller
-// falls through to serve stale; the goroutine continues to run and any cacheable
-// response updates the cache without writing to the detached client connection.
+// falls through to serve stale. The refresh goroutine is bounded by twice
+// verifyStaleTimeout: once the client has been served the stale entry the refresh
+// may run for one more timeout interval, so a slow upstream can still update the
+// cache, and is then canceled. The cancellation propagates to the next plugin
+// (e.g. forward), capping its retries so a dead upstream is not hammered for the
+// full downstream retry window after the client already has an answer.
 func (c *Cache) verifyWithTimeout(ctx context.Context, state request.Request, w dns.ResponseWriter, cw *verifyStaleResponseWriter, r *dns.Msg, do, ad bool, i *item, failureRecheck time.Duration, now func() time.Time) (served bool, code int, err error) {
 	type result struct {
 		code int
@@ -195,8 +199,12 @@ func (c *Cache) verifyWithTimeout(ctx context.Context, state request.Request, w 
 	for label, valueFunc := range metadata.ValueFuncs(ctx) {
 		metadata.SetValueFunc(refreshCtx, label, valueFunc)
 	}
+	refreshCtx, cancel := context.WithTimeout(refreshCtx, 2*c.verifyStaleTimeout)
 	go func() {
 		rc, re := c.doRefresh(refreshCtx, state, cw)
+		// The refresh is done: release the budget timer. On the timeout path
+		// the context has already expired on its own and this is a no-op.
+		cancel()
 		i.endRefresh(now(), failureRecheck, cw.refreshed)
 		done <- result{rc, re}
 	}()

@@ -99,6 +99,13 @@ forward FROM TO... {
   (for example slow recursive resolutions that would otherwise surface as `SERVFAIL`/timeouts). Note
   that this timeout applies to each upstream individually, so large values reduce the time available
   to retry other upstreams within a single query.
+
+Retries for a single query are bounded by a 5s forwarding window, which is shortened by an earlier
+deadline on the request context. This is how the _cache_ plugin coordinates with _forward_: when
+`serve_stale` uses `verify` with a **VERIFY_TIMEOUT**, the cache serves the expired entry once the
+timeout fires and bounds the detached background refresh to twice the timeout; the resulting context
+cancellation stops _forward_'s retries, so an unresponsive upstream is not queried for the full
+window after the client already has an answer.
 * `tls` **CERT** **KEY** **CA** define the TLS properties for TLS connection. From 0 to 3 arguments can be
   provided with the meaning as described below
 

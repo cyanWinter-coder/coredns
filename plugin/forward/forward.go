@@ -136,16 +136,23 @@ func (f *Forward) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	i := 0
 	list := f.List()
 	deadline := time.Now().Add(defaultTimeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		// The request context tightens the retry window: the cache plugin
+		// bounds background stale-verification refreshes this way, and a
+		// caller-imposed deadline should cap retries just like the default
+		// window does. This keeps retries from amplifying upstream queries
+		// after the caller has already settled on an answer (e.g. a stale
+		// cache entry).
+		deadline = d
+	}
 	start := time.Now()
 	maxConnectAttempts := uint64(f.maxConnectAttempts)
 	if !f.maxConnectAttemptsSet {
 		maxConnectAttempts = uint64(defaultConnectAttemptsPerUpstream) * uint64(len(list))
 	}
 	connectAttempts := uint64(0)
+	// deadline already reflects any earlier request deadline from the context.
 	tlsDeadline := deadline
-	if d, ok := ctx.Deadline(); ok && d.Before(tlsDeadline) {
-		tlsDeadline = d
-	}
 	tlsConnectTimeout := time.Until(tlsDeadline)
 	if maxConnectAttempts != 1 {
 		// Reserve time for a fresh connection if the first TLS handshake stalls.
