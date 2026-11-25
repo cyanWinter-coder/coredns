@@ -102,18 +102,42 @@ type pluginWriter struct {
 
 // WriteMsg implements dns.ResponseWriter and tracks the plugin that wrote the response.
 func (pw *pluginWriter) WriteMsg(m *dns.Msg) error {
-	if tracker, ok := pw.ResponseWriter.(PluginTracker); ok {
-		tracker.SetPlugin(pw.plugin)
-	}
-	return pw.ResponseWriter.WriteMsg(m)
+	err := pw.ResponseWriter.WriteMsg(m)
+	pw.trackPlugin()
+	return err
 }
 
 // Write implements dns.ResponseWriter.
 func (pw *pluginWriter) Write(b []byte) (int, error) {
+	n, err := pw.ResponseWriter.Write(b)
+	pw.trackPlugin()
+	return n, err
+}
+
+// trackPlugin propagates this write boundary's plugin name through nested
+// pluginWriter wrappers to the outermost PluginTracker. It runs after the
+// nested write, so the plugin closest to the terminal write wins.
+func (pw *pluginWriter) trackPlugin() {
 	if tracker, ok := pw.ResponseWriter.(PluginTracker); ok {
 		tracker.SetPlugin(pw.plugin)
 	}
-	return pw.ResponseWriter.Write(b)
+}
+
+// SetPlugin implements PluginTracker by propagating name to the wrapped
+// tracker. pluginWriter itself is a propagation hop, not the final owner.
+func (pw *pluginWriter) SetPlugin(name string) {
+	if tracker, ok := pw.ResponseWriter.(PluginTracker); ok {
+		tracker.SetPlugin(name)
+	}
+}
+
+// GetPlugin implements PluginTracker by reading the wrapped tracker when one
+// exists.
+func (pw *pluginWriter) GetPlugin() string {
+	if tracker, ok := pw.ResponseWriter.(PluginTracker); ok {
+		return tracker.GetPlugin()
+	}
+	return pw.plugin
 }
 
 // LocalAddr implements dns.ResponseWriter.

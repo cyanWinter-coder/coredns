@@ -18,7 +18,9 @@ func TestHealth(t *testing.T) {
 
 	address := fmt.Sprintf("http://%s%s", h.ln.Addr().String(), "/health")
 
-	response, err := http.Get(address)
+	// Bypass ambient HTTP(S)_PROXY settings; this is a loopback probe.
+	client := &http.Client{Transport: &http.Transport{Proxy: nil}}
+	response, err := client.Get(address)
 	if err != nil {
 		t.Fatalf("Unable to query %s: %v", address, err)
 	}

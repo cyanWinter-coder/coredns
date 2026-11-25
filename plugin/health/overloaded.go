@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/coredns/coredns/plugin"
@@ -51,9 +52,15 @@ func (h *health) overloaded(ctx context.Context) {
 				log.Warningf("Local health request to %q failed: %s", req.URL.String(), err)
 				continue
 			}
+			HealthResponses.WithLabelValues(strconv.Itoa(resp.StatusCode)).Inc()
 			resp.Body.Close()
 			elapsed := time.Since(start)
 			HealthDuration.Observe(elapsed.Seconds())
+			if resp.StatusCode != http.StatusOK {
+				HealthFailures.Inc()
+				log.Warningf("Local health request to %q returned %d", req.URL.String(), resp.StatusCode)
+				continue
+			}
 			if elapsed > time.Second { // 1s is pretty random, but a *local* scrape taking that long isn't good
 				log.Warningf("Local health request to %q took more than 1s: %s", req.URL.String(), elapsed)
 			}
@@ -81,4 +88,11 @@ var (
 		Name:      "request_failures_total",
 		Help:      "The number of times the health check failed.",
 	})
+	// HealthResponses counts local health probe responses by HTTP status code.
+	HealthResponses = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: plugin.Namespace,
+		Subsystem: "health",
+		Name:      "probe_responses_total",
+		Help:      "The number of local health probe responses by HTTP status code.",
+	}, []string{"status"})
 )
