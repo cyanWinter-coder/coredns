@@ -31,6 +31,7 @@ type Zone struct {
 	Expired bool
 
 	sync.RWMutex
+	transferMu sync.Mutex
 
 	StartupOnce  sync.Once
 	TransferFrom []string
@@ -84,6 +85,113 @@ func (z *Zone) CopyWithoutApex() *Zone {
 	z.RUnlock()
 
 	return z1
+}
+
+// Clone returns a deep-enough, unpublished generation of z. Existing RRs are
+// copied so applying an IXFR never mutates RRs that queries can still read from
+// the live generation.
+func (z *Zone) Clone() *Zone {
+	ap, tr := z.snapshot()
+	z1 := NewZone(z.origin, z.file)
+	z1.TransferFrom = append([]string(nil), z.TransferFrom...)
+	z1.ReloadInterval = z.ReloadInterval
+	z1.ReloadByMtime = z.ReloadByMtime
+	z1.Upstream = z.Upstream
+	z1.Expired = z.Expired
+	z1.Apex = cloneApex(ap)
+	if tr != nil {
+		_ = tr.Walk(func(e *tree.Elem, _ map[uint16][]dns.RR) error {
+			for _, rr := range e.All() {
+				if err := z1.Insert(dns.Copy(rr)); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	}
+	return z1
+}
+
+func cloneApex(a Apex) Apex {
+	out := Apex{}
+	if a.SOA != nil {
+		out.SOA = dns.Copy(a.SOA).(*dns.SOA)
+	}
+	out.NS = copyRRSlice(a.NS)
+	out.SIGSOA = copyRRSlice(a.SIGSOA)
+	out.SIGNS = copyRRSlice(a.SIGNS)
+	return out
+}
+
+func copyRRSlice(rrs []dns.RR) []dns.RR {
+	if len(rrs) == 0 {
+		return nil
+	}
+	out := make([]dns.RR, len(rrs))
+	for i, rr := range rrs {
+		out[i] = dns.Copy(rr)
+	}
+	return out
+}
+
+// DeleteRR removes one exact RR from the candidate zone, including apex RRs
+// that Insert stores outside the tree.
+func (z *Zone) DeleteRR(rr dns.RR) error {
+	if rr == nil {
+		return fmt.Errorf("cannot delete nil RR")
+	}
+	rr.Header().Name = dns.CanonicalName(canonicalEscape(rr.Header().Name))
+
+	switch h := rr.Header().Rrtype; h {
+	case dns.TypeSOA:
+		if z.SOA != nil && dns.IsDuplicate(z.SOA, rr) {
+			z.SOA = nil
+			return nil
+		}
+	case dns.TypeNS:
+		if rr.Header().Name == z.origin {
+			if n := deleteApexRR(&z.NS, rr); n > 0 {
+				return nil
+			}
+		}
+	case dns.TypeRRSIG:
+		x, ok := rr.(*dns.RRSIG)
+		if ok {
+			switch x.TypeCovered {
+			case dns.TypeSOA:
+				if n := deleteApexRR(&z.SIGSOA, rr); n > 0 {
+					return nil
+				}
+			case dns.TypeNS:
+				if rr.Header().Name == z.origin {
+					if n := deleteApexRR(&z.SIGNS, rr); n > 0 {
+						return nil
+					}
+				}
+			}
+		}
+	}
+
+	if z.Tree != nil && z.Tree.DeleteRR(rr) {
+		return nil
+	}
+	return fmt.Errorf("IXFR deletion target not found: %s", rr.String())
+}
+
+func deleteApexRR(rrs *[]dns.RR, target dns.RR) int {
+	for i, rr := range *rrs {
+		if dns.IsDuplicate(rr, target) && rr.Header().Ttl == target.Header().Ttl {
+			*rrs = append((*rrs)[:i], (*rrs)[i+1:]...)
+			return 1
+		}
+	}
+	for i, rr := range *rrs {
+		if dns.IsDuplicate(rr, target) {
+			*rrs = append((*rrs)[:i], (*rrs)[i+1:]...)
+			return 1
+		}
+	}
+	return 0
 }
 
 // Insert inserts r into z.

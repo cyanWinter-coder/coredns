@@ -6,9 +6,15 @@
 
 ## Description
 
-With *secondary* you can transfer (via AXFR) a zone from another server. The retrieved zone is
-*not committed* to disk (a violation of the RFC). This means restarting CoreDNS will cause it to
-retrieve all secondary zones.
+With *secondary* you can transfer a zone from another server. CoreDNS first
+checks the primary SOA serial and skips a transfer when the serial is current.
+When the serial is newer it requests an IXFR and automatically falls back to
+AXFR if IXFR is unsupported or the incremental response is incomplete. Received
+data is staged in a temporary zone file and parsed before the live zone is
+atomically replaced; a failed or interrupted transfer leaves the previous zone
+generation available to queries. The retrieved zone is *not committed* to a
+persistent secondary file by default, so restarting CoreDNS causes it to be
+retrieved again.
 
 If the primary server(s) don't respond when CoreDNS is starting up, the AXFR will be retried
 indefinitely every 10s.
@@ -55,6 +61,12 @@ When a zone is due to be refreshed (refresh timer fires) a random jitter of 5 se
 before fetching. In the case of retry this will be 2 seconds. If there are any errors during the
 transfer in, the transfer fails; this will be logged.
 
+The file plugin records these Prometheus metrics when the metrics plugin is enabled:
+
+* `coredns_file_zone_transfers_total{zone,protocol,result}` counts SOA checks and transfer attempts and outcomes.
+* `coredns_file_zone_transfer_duration_seconds{zone,protocol,result}` records transfer latency.
+* `coredns_file_zone_notifications_total{zone,direction,result}` counts accepted, dropped, successful and failed inbound and outbound notifications.
+
 ## Examples
 
 Transfer `example.org` from 10.0.1.1, and if that fails try 10.1.2.1.
@@ -93,7 +105,7 @@ catalog.example {
 
 ## Bugs
 
-Only AXFR is supported and the retrieved zone is not committed to disk.
+Transferred secondary zones are kept in memory and are not committed to a persistent zone file by default.
 
 ## See Also
 

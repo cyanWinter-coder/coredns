@@ -33,7 +33,7 @@ func setup(c *caddy.Controller) error {
 		f.Xfer = t.(*transfer.Transfer) // if found this must be OK.
 		go func() {
 			for _, n := range zones.Names {
-				f.Xfer.Notify(n)
+				zones.Z[n].notifySecondaries(f.Xfer)
 			}
 		}()
 		return nil
@@ -46,7 +46,7 @@ func setup(c *caddy.Controller) error {
 		}
 		go func() {
 			for _, n := range zones.Names {
-				f.Xfer.Notify(n)
+				zones.Z[n].notifySecondaries(f.Xfer)
 			}
 		}()
 		return nil

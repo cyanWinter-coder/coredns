@@ -1,6 +1,7 @@
 package file
 
 import (
+	"fmt"
 	"math/rand"
 	"time"
 
@@ -15,76 +16,6 @@ type TransferInFunc func(z *Zone, t *transfer.Transfer) error
 // TransferIn retrieves the zone from the masters, parses it and sets it live.
 func (z *Zone) TransferIn(t *transfer.Transfer) error {
 	return z.TransferInWithRecords(t, nil)
-}
-
-// TransferInWithRecords retrieves the zone from the masters, calls validate
-// with the transferred records, and sets the zone live if validation succeeds.
-func (z *Zone) TransferInWithRecords(t *transfer.Transfer, validate func([]dns.RR) error) error {
-	if len(z.TransferFrom) == 0 {
-		return nil
-	}
-	m := new(dns.Msg)
-	m.SetAxfr(z.origin)
-
-	var (
-		Err error
-		tr  string
-		z1  *Zone
-	)
-	var transferred []dns.RR
-
-Transfer:
-	for _, tr = range z.TransferFrom {
-		t := new(dns.Transfer)
-		c, err := t.In(m, tr)
-		if err != nil {
-			log.Errorf("Failed to setup transfer `%s' with `%q': %v", z.origin, tr, err)
-			Err = err
-			continue Transfer
-		}
-		candidate := z.CopyWithoutApex()
-		var records []dns.RR
-		for env := range c {
-			if env.Error != nil {
-				log.Errorf("Failed to transfer `%s' from %q: %v", z.origin, tr, env.Error)
-				Err = env.Error
-				continue Transfer
-			}
-			for _, rr := range env.RR {
-				if err := candidate.Insert(rr); err != nil {
-					log.Errorf("Failed to parse transfer `%s' from: %q: %v", z.origin, tr, err)
-					Err = err
-					continue Transfer
-				}
-				if validate != nil {
-					records = append(records, rr)
-				}
-			}
-		}
-		z1 = candidate
-		transferred = records
-		Err = nil
-		break
-	}
-	if Err != nil {
-		return Err
-	}
-	if validate != nil {
-		if err := validate(transferred); err != nil {
-			return err
-		}
-	}
-
-	z.setData(z1.Apex, z1.Tree)
-	log.Infof("Transferred: %s from %s", z.origin, tr)
-
-	// Send notify messages to secondary servers
-	if t != nil {
-		if err := t.Notify(z.origin); err != nil {
-			log.Warningf("Failed sending notifies: %s", err)
-		}
-	}
-	return nil
 }
 
 // shouldTransfer checks the primaries of zone, retrieves the SOA record, checks the current serial
@@ -102,8 +33,16 @@ Transfer:
 	for _, tr := range z.TransferFrom {
 		Err = nil
 		ret, _, err := c.Exchange(m, tr)
-		if err != nil || ret.Rcode != dns.RcodeSuccess {
+		if err != nil {
 			Err = err
+			continue
+		}
+		if ret == nil {
+			Err = fmt.Errorf("SOA query to %q returned no message", tr)
+			continue
+		}
+		if ret.Rcode != dns.RcodeSuccess {
+			Err = fmt.Errorf("SOA query to %q returned rcode %s", tr, dns.RcodeToString[ret.Rcode])
 			continue
 		}
 		for _, a := range ret.Answer {
@@ -112,6 +51,7 @@ Transfer:
 				break Transfer
 			}
 		}
+		Err = fmt.Errorf("SOA query to %q contained no SOA record", tr)
 	}
 	if serial == -1 {
 		return false, Err
@@ -184,6 +124,7 @@ Restart:
 
 			ok, err := z.shouldTransfer()
 			if err != nil {
+				recordTransfer(z.origin, "soa", "failure")
 				log.Warningf("Failed retry check %s", err)
 				continue
 			}
@@ -209,6 +150,7 @@ Restart:
 
 			ok, err := z.shouldTransfer()
 			if err != nil {
+				recordTransfer(z.origin, "soa", "failure")
 				log.Warningf("Failed refresh check %s", err)
 				retryActive = true
 				continue

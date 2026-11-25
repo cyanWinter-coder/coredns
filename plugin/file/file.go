@@ -66,6 +66,7 @@ func (f File) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (i
 	// This is only for when we are a secondary zones.
 	if r.Opcode == dns.OpcodeNotify {
 		if z.isNotify(state) {
+			recordNotify(zone, "in", "accepted")
 			m := new(dns.Msg)
 			m.SetReply(r)
 			m.Authoritative = true
@@ -73,18 +74,25 @@ func (f File) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (i
 
 			log.Infof("Notify from %s for %s: checking transfer", state.IP(), zone)
 			ok, err := z.shouldTransfer()
+			if err != nil {
+				recordNotify(zone, "in", "serial_check_failure")
+				log.Warningf("Notify from %s for %s: failed primary check: %s", state.IP(), zone, err)
+				return dns.RcodeSuccess, nil
+			}
 			if ok {
 				if err := f.transferIn(z, f.Xfer); err != nil {
+					recordNotify(zone, "in", "transfer_failure")
 					log.Warningf("Notify from %s for %s: transfer failed: %s", state.IP(), zone, err)
+					return dns.RcodeSuccess, nil
 				}
-			} else {
-				log.Infof("Notify from %s for %s: no SOA serial increase seen", state.IP(), zone)
+				recordNotify(zone, "in", "transfer_success")
+				return dns.RcodeSuccess, nil
 			}
-			if err != nil {
-				log.Warningf("Notify from %s for %s: failed primary check: %s", state.IP(), zone, err)
-			}
+			recordNotify(zone, "in", "unchanged")
+			log.Infof("Notify from %s for %s: no SOA serial increase seen", state.IP(), zone)
 			return dns.RcodeSuccess, nil
 		}
+		recordNotify(zone, "in", "dropped")
 		log.Infof("Dropping notify from %s for %s", state.IP(), zone)
 		return dns.RcodeSuccess, nil
 	}

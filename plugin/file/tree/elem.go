@@ -99,5 +99,44 @@ func (e *Elem) Delete(rr dns.RR) {
 	delete(e.m, t)
 }
 
+// DeleteRR removes one RR equal to rr from e. It reports whether an RR was
+// removed. TTL is matched when possible, but a record with the same name,
+// type, class and RDATA is still removed when its TTL differs.
+func (e *Elem) DeleteRR(rr dns.RR) bool {
+	if e.m == nil {
+		return false
+	}
+
+	t := rr.Header().Rrtype
+	rrs := e.m[t]
+	for i, existing := range rrs {
+		if !dns.IsDuplicate(existing, rr) {
+			continue
+		}
+		if existing.Header().Ttl != rr.Header().Ttl {
+			// Prefer an exact TTL match. A first pass that deletes immediately
+			// could remove the wrong member when duplicate RRs have different
+			// TTLs.
+			continue
+		}
+		e.m[t] = append(rrs[:i], rrs[i+1:]...)
+		if len(e.m[t]) == 0 {
+			delete(e.m, t)
+		}
+		return true
+	}
+
+	for i, existing := range rrs {
+		if dns.IsDuplicate(existing, rr) {
+			e.m[t] = append(rrs[:i], rrs[i+1:]...)
+			if len(e.m[t]) == 0 {
+				delete(e.m, t)
+			}
+			return true
+		}
+	}
+	return false
+}
+
 // Less is a tree helper function that calls less.
 func Less(a *Elem, name string) int { return less(name, a.Name()) }

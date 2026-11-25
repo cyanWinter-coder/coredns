@@ -62,11 +62,7 @@ func (z *Zone) Reload(t *transfer.Transfer) error {
 				}
 
 				log.Infof("Successfully reloaded zone %q in %q with %d SOA serial", z.origin, zFile, zone.SOA.Serial)
-				if t != nil {
-					if err := t.Notify(z.origin); err != nil {
-						log.Warningf("Failed sending notifies: %s", err)
-					}
-				}
+				z.notifySecondaries(t)
 
 			case <-z.reloadShutdown:
 				tick.Stop()

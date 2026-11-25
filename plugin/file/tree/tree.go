@@ -292,6 +292,26 @@ func (t *Tree) Delete(rr dns.RR) {
 	}
 }
 
+// DeleteRR removes one RR equal to rr. It reports whether an RR was removed.
+// Unlike Delete, it does not remove the whole RRSet.
+func (t *Tree) DeleteRR(rr dns.RR) bool {
+	if t.Root == nil {
+		return false
+	}
+
+	el, _ := t.Search(rr.Header().Name)
+	if el == nil {
+		return false
+	}
+	if !el.DeleteRR(rr) {
+		return false
+	}
+	if el.Empty() {
+		t.deleteNode(rr)
+	}
+	return true
+}
+
 // DeleteNode deletes the node that matches rr according to Less().
 func (t *Tree) deleteNode(rr dns.RR) {
 	if t.Root == nil {
