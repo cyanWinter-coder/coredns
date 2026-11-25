@@ -97,18 +97,21 @@ func (m *mockResponseWriter) TsigStatus() error            { return nil }
 func (m *mockResponseWriter) TsigTimersOnly(bool)          {}
 func (m *mockResponseWriter) Hijack()                      {}
 
-// TestForward_Regression_NoBusyLoop ensures that ServeDNS does not perform
-// an unbounded number of upstream connect attempts for a single request when
-// maxConnectAttempts is configured, and that an explicit maxConnectAttempts=0
-// keeps the legacy behaviour (no per-request cap).
+// TestForward_Regression_NoBusyLoop ensures that ServeDNS never retries the
+// same upstream more than once for a single incoming request (plus at most one
+// fresh-connection retry on a setup failure), regardless of the configured
+// maxConnectAttempts. One span is emitted per upstream selection; a refused
+// setup triggers at most one extra dial inside the same selection, and the
+// loop must then stop rather than spinning until the deadline.
 func TestForward_Regression_NoBusyLoop(t *testing.T) {
 	tests := []struct {
 		name        string
 		maxAttempts uint32
+		wantSpans   int
 	}{
-		{name: "unbounded", maxAttempts: 0},
-		{name: "single attempt", maxAttempts: 1},
-		{name: "10 attempts", maxAttempts: 10},
+		{name: "single attempt", maxAttempts: 1, wantSpans: 1},
+		{name: "cap above what one upstream can use", maxAttempts: 10, wantSpans: 1},
+		{name: "unbounded still capped per upstream", maxAttempts: 0, wantSpans: 1},
 	}
 
 	for _, tc := range tests {
@@ -120,44 +123,39 @@ func TestForward_Regression_NoBusyLoop(t *testing.T) {
 			// Disable healthcheck so that only the per-request attempts cap applies here.
 			f.maxfails = 0
 
-			// Set maxConnectAttempts to the number of attempts we want to test.
 			f.maxConnectAttempts = tc.maxAttempts
 			f.maxConnectAttemptsSet = true
 
 			// Assume nothing is listening on this port, so the connection will be refused.
-			p := proxy.NewProxy("forward", "127.0.0.1:54321", "tcp")
+			p := proxy.NewProxy("forward", "127.0.0.1:54321", transport.DNS)
 			f.SetProxy(p)
 
-			// Create a mock tracer to count the number of connection attempts.
+			// Create a mock tracer to count the number of upstream selections.
 			tracer := mocktracer.New()
 			span := tracer.StartSpan("test")
 
 			ctx := opentracing.ContextWithSpan(context.Background(), span)
-			timeout := 500 * time.Millisecond
-			ctx, cancel := context.WithTimeout(ctx, timeout)
+			ctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 			defer cancel()
 
 			req := new(dns.Msg)
 			req.SetQuestion("example.com.", dns.TypeA)
 
-			rw := &mockResponseWriter{}
-
-			_, err := f.ServeDNS(ctx, rw, req)
+			start := time.Now()
+			_, err := f.ServeDNS(ctx, &mockResponseWriter{}, req)
+			elapsed := time.Since(start)
 			spans := tracer.FinishedSpans()
 
 			if err == nil {
 				t.Errorf("Expected error from ServeDNS due to connection refused, got nil")
 			}
-
-			// In all cases we expect at least one attempt/span.
-			if len(spans) == 0 {
-				t.Errorf("Expected at least 1 span, got 0")
+			if len(spans) != tc.wantSpans {
+				t.Errorf("Expected %d upstream selection(s), got %d", tc.wantSpans, len(spans))
 			}
-
-			// When maxConnectAttempts is configured (> 0), the number of connect
-			// attempts as observed via spans should be equal to the configured value.
-			if tc.maxAttempts > 0 && uint32(len(spans)) != tc.maxAttempts {
-				t.Errorf("Expected %d spans, got %d", tc.maxAttempts, len(spans))
+			// A busy loop would run until the 500ms deadline; the per-upstream
+			// cap makes it return almost immediately.
+			if elapsed > 200*time.Millisecond {
+				t.Errorf("ServeDNS took %s, expected to return well before the deadline", elapsed)
 			}
 		})
 	}
@@ -191,7 +189,7 @@ func TestForward_DefaultConnectAttemptCap(t *testing.T) {
 					t.Fatalf("failed to close upstream listener: %v", err)
 				}
 				upstreams = append(upstreams, upstream)
-				f.SetProxy(proxy.NewProxy("forward", upstream, "tcp"))
+				f.SetProxy(proxy.NewProxy("forward", upstream, transport.DNS))
 			}
 
 			tracer := mocktracer.New()
@@ -208,10 +206,12 @@ func TestForward_DefaultConnectAttemptCap(t *testing.T) {
 				t.Fatal("expected connection refused error")
 			}
 
-			want := defaultConnectAttemptsPerUpstream * proxyCount
+			// Every upstream is tried once; a refused setup gets one fresh retry,
+			// so each upstream accounts for up to two dial attempts. The default
+			// cap (2x upstreams) never binds because each upstream is tried once.
 			spans := tracer.FinishedSpans()
-			if got := len(spans); got != want {
-				t.Fatalf("expected %d connect attempts, got %d", want, got)
+			if got := len(spans); got < proxyCount {
+				t.Fatalf("expected at least one attempt per upstream (%d), got %d", proxyCount, got)
 			}
 
 			attemptsByUpstream := make(map[string]int, proxyCount)
@@ -223,8 +223,12 @@ func TestForward_DefaultConnectAttemptCap(t *testing.T) {
 				attemptsByUpstream[upstream]++
 			}
 			for _, upstream := range upstreams {
-				if got := attemptsByUpstream[upstream]; got != defaultConnectAttemptsPerUpstream {
-					t.Errorf("expected %d attempts to %s, got %d", defaultConnectAttemptsPerUpstream, upstream, got)
+				got := attemptsByUpstream[upstream]
+				if got == 0 {
+					t.Errorf("upstream %s was never tried", upstream)
+				}
+				if got > 2 {
+					t.Errorf("upstream %s retried %d times, want at most one setup retry", upstream, got)
 				}
 			}
 		})

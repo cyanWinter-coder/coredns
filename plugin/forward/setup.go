@@ -261,6 +261,9 @@ func parseStanza(c *caddy.Controller) (*Forward, error) {
 		f.proxies[i].SetMaxAge(f.maxAge)
 		f.proxies[i].SetMaxIdleConns(f.maxIdleConns)
 		f.proxies[i].SetReadTimeout(f.readTimeout)
+		f.proxies[i].SetMaxFails(f.maxfails)
+		f.proxies[i].SetHalfOpenWeight(f.halfOpenWeight)
+		f.proxies[i].SetHealthBackoff(f.healthBackoff)
 		f.proxies[i].GetHealthchecker().SetRecursionDesired(f.opts.HCRecursionDesired)
 		// DoT and DoQ health checkers already use their configured transport.
 		if f.opts.ForceTCP && transports[i] != transport.TLS && transports[i] != transport.QUIC {
@@ -422,6 +425,42 @@ func parseBlock(c *caddy.Controller, f *Forward) error {
 			return fmt.Errorf("read_timeout must be positive: %s", dur)
 		}
 		f.readTimeout = dur
+	case "upstream_timeout":
+		if !c.NextArg() {
+			return c.ArgErr()
+		}
+		dur, err := time.ParseDuration(c.Val())
+		if err != nil {
+			return err
+		}
+		if dur <= 0 {
+			return fmt.Errorf("upstream_timeout must be positive: %s", dur)
+		}
+		f.upstreamTimeout = dur
+	case "half_open_weight":
+		if !c.NextArg() {
+			return c.ArgErr()
+		}
+		n, err := strconv.ParseUint(c.Val(), 10, 32)
+		if err != nil {
+			return err
+		}
+		if n > 100 {
+			return fmt.Errorf("half_open_weight must be between 0 and 100: %d", n)
+		}
+		f.halfOpenWeight = uint32(n)
+	case "health_backoff":
+		if !c.NextArg() {
+			return c.ArgErr()
+		}
+		dur, err := time.ParseDuration(c.Val())
+		if err != nil {
+			return err
+		}
+		if dur < 0 {
+			return fmt.Errorf("health_backoff can't be negative: %s", dur)
+		}
+		f.healthBackoff = dur
 	case "doh_method":
 		if !c.NextArg() {
 			return c.ArgErr()

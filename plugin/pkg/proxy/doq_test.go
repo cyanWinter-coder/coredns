@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -176,12 +177,12 @@ func makeDoQTestTLSConfigs(t *testing.T) (*tls.Config, *tls.Config) {
 	}
 	roots.AddCert(parsed)
 	return &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		NextProtos:   []string{doqALPN},
-	}, &tls.Config{
-		RootCAs:    roots,
-		ServerName: "doq.test",
-	}
+			Certificates: []tls.Certificate{cert},
+			NextProtos:   []string{doqALPN},
+		}, &tls.Config{
+			RootCAs:    roots,
+			ServerName: "doq.test",
+		}
 }
 
 func writeDoQTestResponse(stream *quic.Stream, response *dns.Msg) error {
@@ -527,7 +528,10 @@ func TestDoQHealthCheck(t *testing.T) {
 	})
 
 	p := NewProxy("TestDoQHealth", server.addr(), transport.QUIC)
-	p.initiallyDown.Store(true)
+	p.SetMaxFails(2)
+	p.SetHalfOpenWeight(100)
+	p.breaker.state.Store(uint32(StateOpen))
+	publishStatus(p.proxyName, p.addr, StateOpen)
 	p.SetTLSConfig(clientTLS)
 	defer p.Stop()
 	hc := p.GetHealthchecker()
@@ -638,8 +642,8 @@ func TestDoQStopCancelsDial(t *testing.T) {
 	}
 	p.Stop()
 	_, _, _, err = p.Connect(context.Background(), doqTestRequest("example.org.", 2), Options{})
-	if err == nil || err.Error() != ErrTransportStopped {
-		t.Fatalf("Connect() after Stop() error = %v, want %q", err, ErrTransportStopped)
+	if err == nil || !strings.Contains(err.Error(), ErrTransportStopped) {
+		t.Fatalf("Connect() after Stop() error = %v, want it to contain %q", err, ErrTransportStopped)
 	}
 }
 

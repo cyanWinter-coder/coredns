@@ -5,7 +5,6 @@ import (
 	"net"
 	"net/http"
 	"runtime"
-	"sync/atomic"
 	"time"
 
 	"github.com/coredns/coredns/plugin/pkg/log"
@@ -15,10 +14,8 @@ import (
 
 // Proxy defines an upstream host.
 type Proxy struct {
-	fails         uint32
-	initiallyDown atomic.Bool
-	addr          string
-	proxyName     string
+	addr      string
+	proxyName string
 
 	transport *Transport
 	doq       *doqTransport
@@ -29,6 +26,10 @@ type Proxy struct {
 
 	readTimeout time.Duration
 
+	// breaker holds the per-upstream failure counters, latency estimate and
+	// circuit-breaker state (closed/open/half-open).
+	breaker *Breaker
+
 	// health checking
 	probe  *up.Probe
 	health HealthChecker
@@ -38,7 +39,6 @@ type Proxy struct {
 func NewProxy(proxyName, addr, protocol string) *Proxy {
 	p := &Proxy{
 		addr:        addr,
-		fails:       0,
 		probe:       up.New(),
 		readTimeout: 2 * time.Second,
 		transport:   newTransport(proxyName, addr),
@@ -48,6 +48,9 @@ func NewProxy(proxyName, addr, protocol string) *Proxy {
 		health:      NewHealthChecker(proxyName, protocol, true, "."),
 		proxyName:   proxyName,
 	}
+	p.breaker = NewBreaker(0)
+	p.breaker.onTransition = func(s State) { publishStatus(p.proxyName, p.addr, s) }
+	publishStatus(p.proxyName, p.addr, StateClosed)
 	if protocol == transport.QUIC {
 		p.doq = newDoQTransport(proxyName, addr)
 	}
@@ -121,11 +124,48 @@ func (p *Proxy) GetTransport() *Transport {
 	return p.transport
 }
 
-func (p *Proxy) Fails() uint32 {
-	return atomic.LoadUint32(&p.fails)
+// Breaker returns the proxy's circuit breaker.
+func (p *Proxy) Breaker() *Breaker { return p.breaker }
+
+// SetMaxFails configures the number of consecutive failures after which the
+// proxy is removed from rotation. A zero maxfails disables circuit breaking and
+// keeps the legacy behavior of always considering the proxy healthy.
+func (p *Proxy) SetMaxFails(maxfails uint32) {
+	p.breaker.maxConsecutiveFails = maxfails
 }
 
-// Healthcheck kicks of a round of health checks for this proxy.
+// SetHalfOpenWeight configures the share of traffic, in percent, admitted to
+// the proxy while it is recovering in the half-open state.
+func (p *Proxy) SetHalfOpenWeight(percent uint32) {
+	p.breaker.SetHalfOpenWeight(percent)
+}
+
+// Fails returns the current consecutive failure count.
+func (p *Proxy) Fails() uint32 {
+	return p.breaker.ConsecutiveFails()
+}
+
+// State returns the circuit-breaker state of the proxy.
+func (p *Proxy) State() State {
+	return p.breaker.State()
+}
+
+// Admit reports whether traffic may be sent to the proxy right now.
+func (p *Proxy) Admit() bool {
+	return p.breaker.Admit()
+}
+
+// Healthcheck starts a health-probe round for this proxy. The probe runs in
+// the background and drives circuit recovery to completion:
+//
+//   - while the breaker is open, a failed check is retried with exponential
+//     backoff until the upstream answers;
+//   - the first successful check promotes the breaker to half-open, after which
+//     checks continue at the base interval until enough consecutive successes
+//     close the breaker;
+//   - any failure during half-open reopens the breaker and restarts backoff.
+//
+// A no-op when a round is already in flight or no health checker is configured.
 func (p *Proxy) Healthcheck() {
 	if p.health == nil {
 		log.Warning("No healthchecker")
@@ -133,32 +173,50 @@ func (p *Proxy) Healthcheck() {
 	}
 
 	p.probe.Do(func() error {
-		return p.health.Check(p)
+		for {
+			err := p.health.Check(p)
+			if err != nil {
+				// Check already recorded the failure (and any state change) on
+				// the breaker. Keep probing with exponential backoff.
+				return err
+			}
+
+			// Check recorded a success and advanced the recovery state.
+			switch p.breaker.State() {
+			case StateClosed:
+				// Fully recovered: stop this probe round.
+				return nil
+			case StateHalfOpen:
+				// Recovering: keep probing at the steady base interval rather
+				// than the grown failure backoff, so a healthy upstream returns
+				// to full rotation promptly. A failed check above reopens it.
+				if !p.probe.Wait(p.probe.Interval()) {
+					return nil
+				}
+			default:
+				// Transient state (e.g. breaking disabled mid-probe): stop.
+				return nil
+			}
+		}
 	})
 }
 
 // StartFailed marks the proxy down until its first successful health check and
 // starts probing immediately. Start must be called first to set the probe interval.
 func (p *Proxy) StartFailed() {
-	p.initiallyDown.Store(true)
+	p.breaker.MarkOpen()
 	p.Healthcheck()
 }
 
-// Down reports whether the proxy is awaiting its first successful startup check
-// or has more failures than maxfails. A zero maxfails disables both checks.
+// Down reports whether the proxy must not receive traffic: it is either fully
+// open (removed after consecutive failures, or awaiting its first startup
+// check) or in half-open state and not admitting this call. A zero maxfails
+// disables the check entirely, preserving the legacy behavior.
 func (p *Proxy) Down(maxfails uint32) bool {
 	if maxfails == 0 {
 		return false
 	}
-
-	fails := atomic.LoadUint32(&p.fails)
-	return p.initiallyDown.Load() || fails > maxfails
-}
-
-// resetFails makes the proxy available after a successful health check.
-func (p *Proxy) resetFails() {
-	atomic.StoreUint32(&p.fails, 0)
-	p.initiallyDown.Store(false)
+	return !p.breaker.Admit()
 }
 
 // Stop stops health checking and closes the DoQ transport, when configured.
@@ -187,21 +245,17 @@ func (p *Proxy) Start(duration time.Duration) {
 	p.transport.Start()
 }
 
+// SetHealthBackoff caps the exponential wait between consecutive failed
+// health checks.
+func (p *Proxy) SetHealthBackoff(maxBackoff time.Duration) {
+	p.probe.SetMaxBackoff(maxBackoff)
+}
+
 func (p *Proxy) SetReadTimeout(duration time.Duration) {
 	p.readTimeout = duration
 	if p.doq != nil {
 		p.doq.setReadTimeout(duration)
 	}
-}
-
-// incrementFails increments the number of fails safely.
-func (p *Proxy) incrementFails() {
-	curVal := atomic.LoadUint32(&p.fails)
-	if curVal > curVal+1 {
-		// overflow occurred, do not update the counter again
-		return
-	}
-	atomic.AddUint32(&p.fails, 1)
 }
 
 // SetLocalAddress sets the local address for the proxy, used as the source address for outbound connections.

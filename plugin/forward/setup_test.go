@@ -561,6 +561,61 @@ func TestSetupHealthCheck(t *testing.T) {
 	}
 }
 
+func TestSetupUpstreamManagement(t *testing.T) {
+	tests := []struct {
+		input             string
+		shouldErr         bool
+		expectedTimeout   time.Duration
+		expectedWeight    uint32
+		expectedBackoff   time.Duration
+		expectedErrSubstr string
+	}{
+		// defaults
+		{"forward . 127.0.0.1", false, defaultUpstreamTimeout, defaultHalfOpenWeight, defaultHealthBackoff, ""},
+		// explicit values
+		{"forward . 127.0.0.1 {\nupstream_timeout 1s\nhalf_open_weight 25\nhealth_backoff 10s\n}", false, time.Second, 25, 10 * time.Second, ""},
+		{"forward . 127.0.0.1 {\nhalf_open_weight 0\n}", false, defaultUpstreamTimeout, 0, defaultHealthBackoff, ""},
+		{"forward . 127.0.0.1 {\nhalf_open_weight 100\n}", false, defaultUpstreamTimeout, 100, defaultHealthBackoff, ""},
+		// validation
+		{"forward . 127.0.0.1 {\nupstream_timeout 0s\n}", true, 0, 0, 0, "upstream_timeout must be positive"},
+		{"forward . 127.0.0.1 {\nhalf_open_weight 101\n}", true, 0, 0, 0, "half_open_weight must be between 0 and 100"},
+		{"forward . 127.0.0.1 {\nhealth_backoff -1s\n}", true, 0, 0, 0, "health_backoff can't be negative"},
+	}
+
+	for i, tc := range tests {
+		c := caddy.NewTestController("dns", tc.input)
+		fs, err := parseForward(c)
+		if tc.shouldErr {
+			if err == nil {
+				t.Errorf("Test %d: expected error, got none for input %s", i, tc.input)
+				continue
+			}
+			if !strings.Contains(err.Error(), tc.expectedErrSubstr) {
+				t.Errorf("Test %d: expected error containing %q, got %v", i, tc.expectedErrSubstr, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("Test %d: unexpected error: %v", i, err)
+		}
+		f := fs[0]
+		if f.upstreamTimeout != tc.expectedTimeout {
+			t.Errorf("Test %d: upstreamTimeout = %s, want %s", i, f.upstreamTimeout, tc.expectedTimeout)
+		}
+		if f.halfOpenWeight != tc.expectedWeight {
+			t.Errorf("Test %d: halfOpenWeight = %d, want %d", i, f.halfOpenWeight, tc.expectedWeight)
+		}
+		if f.healthBackoff != tc.expectedBackoff {
+			t.Errorf("Test %d: healthBackoff = %s, want %s", i, f.healthBackoff, tc.expectedBackoff)
+		}
+		for _, p := range f.proxies {
+			if p.Breaker() == nil {
+				t.Fatalf("Test %d: upstream %s has no breaker", i, p.Addr())
+			}
+		}
+	}
+}
+
 func TestMultiForward(t *testing.T) {
 	input := `
       forward 1st.example.org 10.0.0.1

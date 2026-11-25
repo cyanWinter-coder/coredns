@@ -125,11 +125,12 @@ func (h *doqHc) Check(p *Proxy) error {
 	}
 	if err != nil {
 		healthcheckFailureCount.WithLabelValues(p.proxyName, p.addr).Inc()
-		p.incrementFails()
+		p.breaker.RecordFailure()
 		return err
 	}
 
-	p.resetFails()
+	// A successful probe promotes Open -> HalfOpen (or completes HalfOpen trials).
+	p.breaker.RecordSuccess(0)
 	return nil
 }
 
@@ -214,11 +215,11 @@ func (h *dnsHc) Check(p *Proxy) error {
 	err := h.send(p.addr)
 	if err != nil {
 		healthcheckFailureCount.WithLabelValues(p.proxyName, p.addr).Add(1)
-		p.incrementFails()
+		p.breaker.RecordFailure()
 		return err
 	}
 
-	p.resetFails()
+	p.breaker.RecordSuccess(0)
 	return nil
 }
 
@@ -288,11 +289,11 @@ func (h *dohHc) Check(p *Proxy) error {
 	err := h.send(p.addr, p.dohHost)
 	if err != nil {
 		healthcheckFailureCount.WithLabelValues(p.proxyName, p.addr).Add(1)
-		p.incrementFails()
+		p.breaker.RecordFailure()
 		return err
 	}
 
-	p.resetFails()
+	p.breaker.RecordSuccess(0)
 	return nil
 }
 

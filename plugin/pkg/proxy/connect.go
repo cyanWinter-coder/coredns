@@ -165,7 +165,7 @@ func (p *Proxy) lookupDNS(ctx context.Context, state request.Request, opts Optio
 
 	pc, cached, err := p.transport.dial(ctx, proto, opts.TLSConnectDeadline)
 	if err != nil {
-		return nil, nil, proto, err
+		return nil, nil, proto, SetupError(err)
 	}
 
 	// Dial may have upgraded the transport (e.g. from udp to tcp for DoT),
@@ -322,6 +322,7 @@ func (p *Proxy) Connect(ctx context.Context, state request.Request, opts Options
 		return nil, nil, "", fmt.Errorf("transport %s not supported to proxy", p.protocol)
 	}
 	if err != nil {
+		p.recordExchangeFailure()
 		return nil, localAddr, proto, err
 	}
 
@@ -333,9 +334,26 @@ func (p *Proxy) Connect(ctx context.Context, state request.Request, opts Options
 		rc = strconv.Itoa(ret.Rcode)
 	}
 
-	requestDuration.WithLabelValues(p.proxyName, p.addr, rc).Observe(time.Since(start).Seconds())
+	elapsed := time.Since(start)
+	requestDuration.WithLabelValues(p.proxyName, p.addr, rc).Observe(elapsed.Seconds())
+	p.recordExchangeSuccess(elapsed)
 
 	return ret, localAddr, proto, nil
+}
+
+// recordExchangeSuccess updates the breaker and request counters after a healthy exchange.
+func (p *Proxy) recordExchangeSuccess(latency time.Duration) {
+	p.breaker.ObserveRequest()
+	p.breaker.RecordSuccess(latency)
+	requestTotalCount.WithLabelValues(p.proxyName, p.addr).Inc()
+}
+
+// recordExchangeFailure updates the breaker and request counters after a failed exchange.
+func (p *Proxy) recordExchangeFailure() {
+	p.breaker.ObserveRequest()
+	p.breaker.ObserveFailure()
+	p.breaker.RecordFailure()
+	requestFailureCount.WithLabelValues(p.proxyName, p.addr).Inc()
 }
 
 const cumulativeAvgWeight = 4

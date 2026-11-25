@@ -33,7 +33,6 @@ func TestHealth(t *testing.T) {
 	hc.SetWriteTimeout(10 * time.Millisecond)
 
 	p := NewProxy("TestHealth", s.Addr, transport.DNS)
-	p.initiallyDown.Store(true)
 	p.readTimeout = 10 * time.Millisecond
 	err := hc.Check(p)
 	if err != nil {
@@ -114,7 +113,6 @@ func TestHealthHTTPS(t *testing.T) {
 	hc.SetWriteTimeout(1 * time.Second)
 
 	p := NewProxy("TestHealthHTTPS", s.URL, transport.HTTPS)
-	p.initiallyDown.Store(true)
 	p.readTimeout = 10 * time.Millisecond
 	err := hc.Check(p)
 	if err != nil {

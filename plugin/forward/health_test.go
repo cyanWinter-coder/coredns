@@ -217,6 +217,7 @@ func TestHealthMaxFails(t *testing.T) {
 	f := New()
 	f.hcInterval = 10 * time.Millisecond
 	f.maxfails = 2
+	p.SetMaxFails(f.maxfails)
 	f.SetProxy(p)
 	defer f.OnShutdown()
 
@@ -225,16 +226,20 @@ func TestHealthMaxFails(t *testing.T) {
 
 	f.ServeDNS(context.TODO(), &test.ResponseWriter{}, req)
 
-	// Wait for the asynchronous probes to exceed maxfails, including on busy runners.
+	// Wait for the breaker to open as failures reach maxfails, including on
+	// busy runners. The breaker opens at maxfails consecutive failures.
 	for start := time.Now(); time.Since(start) < 2*time.Second; {
-		if p.Fails() > f.maxfails {
+		if p.State() == proxy.StateOpen {
 			break
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
 	fails := p.Fails()
 	if !p.Down(f.maxfails) {
-		t.Errorf("Expected Proxy fails to be greater than %d, got %d", f.maxfails, fails)
+		t.Errorf("Expected Proxy to be down after %d consecutive fails (maxfails=%d)", fails, f.maxfails)
+	}
+	if fails < f.maxfails {
+		t.Errorf("Expected fails >= %d, got %d", f.maxfails, fails)
 	}
 }
 
@@ -346,8 +351,10 @@ func TestAllUpstreamsDown(t *testing.T) {
 	f.SetProxy(p1)
 	f.failfastUnhealthyUpstreams = true
 	f.maxfails = 1
-	// Make proxys fail by checking health twice
-	// i.e, fails > maxfails
+	p.SetMaxFails(f.maxfails)
+	p1.SetMaxFails(f.maxfails)
+	// One failed check reaches maxfails and opens the breaker; run a second
+	// round to mirror the historical repeated-failure setup.
 	for range f.maxfails + 1 {
 		p.GetHealthchecker().Check(p)
 		p1.GetHealthchecker().Check(p1)
@@ -376,7 +383,9 @@ func TestAllUpstreamsDown(t *testing.T) {
 		t.Errorf("Expected queries to the upstream: 0, Got: %d", q1)
 	}
 
-	// set failfast to false to check if queries get answered
+	// set failfast to false to check if queries get answered. Without
+	// fail-fast the removed upstreams are each tried once (no breaker is
+	// permanently trusted), so both open proxies receive a sprayed query.
 	f.failfastUnhealthyUpstreams = false
 
 	req = new(dns.Msg)
@@ -387,7 +396,7 @@ func TestAllUpstreamsDown(t *testing.T) {
 	}
 
 	q1 = atomic.LoadUint32(&qs)
-	if q1 != 1 {
-		t.Errorf("Expected queries to the upstream: 1, Got: %d", q1)
+	if q1 != 2 {
+		t.Errorf("Expected one sprayed query per removed upstream: 2, Got: %d", q1)
 	}
 }

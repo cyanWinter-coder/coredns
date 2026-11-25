@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"math"
 	"net"
 	"runtime"
 	"strings"
@@ -143,33 +142,40 @@ func TestProtocolSelection(t *testing.T) {
 	}
 }
 
-func TestProxyIncrementFails(t *testing.T) {
-	var testCases = []struct {
-		name        string
-		fails       uint32
-		expectFails uint32
-	}{
-		{
-			name:        "increment fails counter overflows",
-			fails:       math.MaxUint32,
-			expectFails: math.MaxUint32,
-		},
-		{
-			name:        "increment fails counter",
-			fails:       0,
-			expectFails: 1,
-		},
+func TestProxyRecordFailure(t *testing.T) {
+	p := NewProxy("TestProxyRecordFailure", "bad_address", transport.DNS)
+	p.SetMaxFails(2)
+
+	if p.Fails() != 0 {
+		t.Fatalf("expected zero fails on a new proxy, got %d", p.Fails())
+	}
+	if p.State() != StateClosed {
+		t.Fatalf("expected a closed breaker, got %s", p.State())
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			p := NewProxy("TestProxyIncrementFails", "bad_address", transport.DNS)
-			p.fails = tc.fails
-			p.incrementFails()
-			if p.fails != tc.expectFails {
-				t.Errorf("Expected fails to be %d, got %d", tc.expectFails, p.fails)
-			}
-		})
+	p.breaker.RecordFailure()
+	if got := p.Fails(); got != 1 {
+		t.Errorf("expected fails 1, got %d", got)
+	}
+	if p.State() != StateClosed {
+		t.Errorf("proxy must stay closed below maxfails, got %s", p.State())
+	}
+
+	p.breaker.RecordFailure()
+	if p.State() != StateOpen {
+		t.Errorf("expected open after maxfails, got %s", p.State())
+	}
+	if p.Admit() {
+		t.Error("open proxy must not admit traffic")
+	}
+
+	// A successful probe promotes to half-open; the configured number of
+	// consecutive trials then closes the breaker.
+	for range defaultHalfOpenTrials + 1 {
+		p.breaker.RecordSuccess(0)
+	}
+	if p.State() != StateClosed || p.Fails() != 0 {
+		t.Errorf("expected closed with zero fails after trials, got %s fails=%d", p.State(), p.Fails())
 	}
 }
 

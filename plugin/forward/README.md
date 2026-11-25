@@ -16,6 +16,14 @@ to get upstream health. Any response that is not a network error (REFUSED, NOTIM
 is taken as a healthy upstream. The health check uses the same protocol as specified in **TO**. If
 `max_fails` is set to 0, no checking is performed and upstreams will always be considered healthy.
 
+Each upstream is managed independently by a circuit breaker. Consecutive failed exchanges open
+the breaker after `max_fails` failures and remove the upstream from rotation (with exponential
+backoff between health checks), so a half-broken upstream no longer makes every request wait out
+its full timeout. A successful health check moves the breaker to *half-open*, where only a
+configurable share of traffic is admitted while the upstream proves itself again; enough
+consecutive successful checks then close the breaker and restore full traffic. Per-upstream
+failure counts and smoothed latency are exported as metrics.
+
 When *all* upstreams are down it assumes health checking as a mechanism has failed and will try to
 connect to a random upstream (which may or may not work).
 
@@ -52,6 +60,9 @@ forward FROM TO... {
     read_timeout DURATION
     max_fails INTEGER
     max_connect_attempts INTEGER
+    upstream_timeout DURATION
+    half_open_weight INTEGER
+    health_backoff DURATION
     doh_method GET|POST
     tls CERT KEY CA
     tls_servername NAME
@@ -75,9 +86,22 @@ forward FROM TO... {
   (TC flag set in response) then do another attempt over TCP. In case if both `force_tcp` and
   `prefer_udp` options specified the `force_tcp` takes precedence. These options do not change an
   explicitly configured DoT, DoQ, or DoH upstream transport.
-* `max_fails` is the number of subsequent failed health checks that are needed before considering
-  an upstream to be down. If 0, the upstream will never be marked as down (nor health checked).
-  Default is 2.
+* `max_fails` is the number of consecutive failed exchanges (or health checks) that open the
+  circuit breaker and remove an upstream from rotation. If 0, the upstream will never be marked
+  as down (nor health checked). Default is 2. While open, health checks continue with
+  exponential backoff; once the upstream answers it enters half-open and, after enough
+  consecutive successful checks, returns to full rotation.
+* `upstream_timeout` **DURATION** bounds the time spent on a single upstream attempt, including
+  dialing, the TLS/QUIC handshake and waiting for the reply. The default is 5s. It is capped by
+  the overall forwarding retry window and any caller deadline, so a stalled upstream is abandoned
+  at the upstream level instead of being retried serially until the whole window is consumed.
+* `half_open_weight` **INTEGER** is the percentage (0-100) of traffic admitted to an upstream
+  while its breaker is half-open, i.e. while it is proving itself after a recovery. The default
+  is 10, which ramps traffic back gradually so a flapping upstream cannot immediately receive
+  the full load again. 100 restores full traffic as soon as the first recovery check succeeds.
+* `health_backoff` **DURATION** caps the exponential wait between consecutive failed health
+  checks of a removed upstream. The wait starts at the `health_check` interval and doubles up to
+  this cap, which defaults to 30s. A successful check resets the backoff.
 * `start_failed` starts upstreams in an unhealthy state and immediately runs health checks using
   the configured `health_check` settings. Each upstream becomes healthy after its first successful
   check. This option is disabled by default and cannot be combined with `max_fails 0`.
@@ -176,6 +200,11 @@ If monitoring is enabled (via the *prometheus* plugin) then the following metric
 * `coredns_forward_max_concurrent_rejects_total{}` - count of queries rejected because the
   number of concurrent queries were at maximum.
 * `coredns_proxy_request_duration_seconds{proxy_name="forward", to, rcode}` - histogram per upstream, RCODE
+* `coredns_proxy_requests_total{proxy_name="forward", to}` - count of requests sent to each upstream, including failed ones.
+* `coredns_proxy_request_failures_total{proxy_name="forward", to}` - count of requests that failed with a network or timeout error.
+  Divide this by `coredns_proxy_requests_total` for the per-upstream failure rate.
+* `coredns_proxy_upstream_status{proxy_name="forward", to, state}` - circuit-breaker state of each upstream. Exactly one `state`
+  label (`closed`, `half_open`, or `open`) is set to 1 at a time, the others to 0.
 * `coredns_proxy_healthcheck_failures_total{proxy_name="forward", to, rcode}`- count of failed health checks per upstream.
 * `coredns_proxy_conn_cache_hits_total{proxy_name="forward", to, proto}`- count of connection cache hits per upstream and protocol.
 * `coredns_proxy_conn_cache_misses_total{proxy_name="forward", to, proto}` - count of connection cache misses per upstream and protocol.

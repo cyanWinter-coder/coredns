@@ -374,7 +374,7 @@ func (t *doqTransport) exchange(ctx context.Context, msg *dns.Msg, timeout time.
 
 	c, cached, err := t.acquire(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, SetupError(err)
 	}
 	localAddr := c.conn.LocalAddr()
 	if timeout <= 0 {
