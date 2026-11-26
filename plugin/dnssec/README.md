@@ -6,13 +6,30 @@
 
 ## Description
 
-With *dnssec*, any reply that doesn't (or can't) do DNSSEC will get signed on the fly. Authenticated
-denial of existence is implemented with NSEC black lies. Using ECDSA as an algorithm is preferred as
-this leads to smaller signatures (compared to RSA). NSEC3 is *not* supported.
+With *dnssec*, any reply that doesn't (or can't) do DNSSEC will get signed on the fly. Only replies to
+queries with the DO bit set are signed; a reply to a client that did not set DO is returned as-is.
+Authenticated denial of existence is implemented with NSEC black lies. Using ECDSA as an algorithm is
+preferred as this leads to smaller signatures (compared to RSA). NSEC3 is *not* supported.
+
+Signatures are cached per RRset. The cache key includes the RRset content, the wildcard owner a
+wildcard expansion was synthesized from (if any) and the key tags of the configured keys, and entries
+live for the RRset's TTL. The key tags in the key mean a key rollover never serves signatures made by
+a previous key set; while both the old and the new key are configured (the rollover window), the
+key set is unchanged and signatures of both keys are served. Cached signatures are also selected by
+key tag, so removing a key drops only that key's signatures.
+
+If a reply cannot be signed — no key applies to an RRset, an algorithm is not supported, or the key
+fails to produce a signature — *dnssec* returns SERVFAIL and logs the reason instead of serving the
+RRset unsigned. Unsigned data would look insecure or bogus to a validating client.
 
 To generate an NSEC proof for an authoritative NODATA response (the name exists but has no records of
 the requested type), *dnssec* requires the zone's SOA to be the only record in the authority section.
 When using *forward*, the upstream server must supply that SOA.
+
+When the *file* plugin served the reply from a wildcard, it records the wildcard owner as
+`zone/wildcard` metadata. Enable the *metadata* plugin for *dnssec* to pick that up and produce
+RRSIGs whose Labels field covers the wildcard owner (RFC 4034 section 3.1.3); without it the
+wildcard expansion is signed as a literal name.
 
 This plugin can only be used once per Server Block.
 
@@ -36,7 +53,8 @@ Authenticated denial of existence is implemented with NSEC black lies. Using ECD
 is preferred as this leads to smaller signatures (compared to RSA). NSEC3 is *not* supported.
 
 As the *dnssec* plugin can't see the original TTL of the RRSets it signs, it will always use 3600s
-as the value.
+as the value. The signature cache follows the TTL of the RRset being signed (which for data coming
+from *file* is the zone's TTL).
 
 If multiple *dnssec* plugins are specified in the same zone, the last one specified will be
 used.

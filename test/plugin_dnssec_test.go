@@ -74,3 +74,61 @@ Activate: 20160426083115`),
 }
 
 const base = "Kexample.org.+013+44563"
+
+// TestDnssecWildcardSignatureLabels checks the full chain: the *file* plugin serves
+// a wildcard expansion and records the wildcard owner as metadata, and *dnssec*
+// signs the expansion over that wildcard owner (RFC 4034 section 3.1.3).
+func TestDnssecWildcardSignatureLabels(t *testing.T) {
+	t.Parallel()
+	name, rm, err := test.TempFile(".", exampleOrg)
+	if err != nil {
+		t.Fatalf("Failed to create zone: %s", err)
+	}
+	defer rm()
+	rm1 := createKeyFile(t)
+	defer rm1()
+
+	corefile := `example.org:0 {
+		metadata
+		file ` + name + `
+		dnssec {
+			key file ` + base + `
+		}
+	}`
+
+	ex, udp, _, err := CoreDNSServerAndPorts(corefile)
+	if err != nil {
+		t.Fatalf("Could not get CoreDNS serving instance: %s", err)
+	}
+	defer ex.Stop()
+
+	c := new(dns.Client)
+	m := new(dns.Msg)
+	m.SetQuestion("a.w.example.org.", dns.TypeTXT)
+	m.SetEdns0(4096, true)
+	res, _, err := c.Exchange(m, udp)
+	if err != nil {
+		t.Fatalf("Could not send query: %s", err)
+	}
+	if res.Rcode != dns.RcodeSuccess {
+		t.Fatalf("Expected NOERROR, got %s", dns.RcodeToString[res.Rcode])
+	}
+
+	var sig *dns.RRSIG
+	for _, rr := range res.Answer {
+		if s, ok := rr.(*dns.RRSIG); ok && s.TypeCovered == dns.TypeTXT {
+			sig = s
+		}
+	}
+	if sig == nil {
+		t.Fatalf("Expected an RRSIG for the wildcard expansion, got none: %v", res)
+	}
+	// *.w.example.org. has 4 labels; without the wildcard label the expansion has 4
+	// as well, but the signed name must be the wildcard (3 labels below the zone).
+	if sig.Labels != uint8(dns.CountLabel("w.example.org.")) {
+		t.Errorf("Expected wildcard RRSIG with %d labels, got %d", dns.CountLabel("w.example.org."), sig.Labels)
+	}
+	if sig.Hdr.Name != "a.w.example.org." {
+		t.Errorf("Expected RRSIG owner a.w.example.org., got %s", sig.Hdr.Name)
+	}
+}

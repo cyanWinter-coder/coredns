@@ -138,6 +138,7 @@ func ParseKeyFromAWSSecretsManager(secretID string) (*DNSKEY, error) {
 }
 
 // getDNSKEY returns the correct DNSKEY to the client. Signatures are added when do is true.
+// When a signature cannot be produced the reply is a SERVFAIL, never an unsigned one.
 func (d Dnssec) getDNSKEY(state request.Request, zone string, do bool, server string) *dns.Msg {
 	keys := make([]dns.RR, len(d.keys))
 	for i, k := range d.keys {
@@ -152,9 +153,12 @@ func (d Dnssec) getDNSKEY(state request.Request, zone string, do bool, server st
 	}
 
 	incep, expir := incepExpir(time.Now().UTC())
-	if sigs, err := d.sign(keys, zone, 3600, incep, expir, server); err == nil {
-		m.Answer = append(m.Answer, sigs...)
+	sigs, err := d.sign(keys, zone, origTTL, incep, expir, server)
+	if err != nil {
+		log.Errorf("Failed to sign DNSKEY for zone %q: %s", zone, err)
+		return servfailMsg(state.Req)
 	}
+	m.Answer = append(m.Answer, sigs...)
 	return m
 }
 

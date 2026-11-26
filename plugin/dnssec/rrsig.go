@@ -1,6 +1,29 @@
 package dnssec
 
-import "github.com/miekg/dns"
+import (
+	"github.com/miekg/dns"
+)
+
+// servfailMsg returns a SERVFAIL reply for req, with the same question so clients can
+// match it to their query.
+func servfailMsg(req *dns.Msg) *dns.Msg {
+	m := new(dns.Msg)
+	if req != nil {
+		m.SetRcode(req, dns.RcodeServerFailure)
+	} else {
+		m.Rcode = dns.RcodeServerFailure
+		m.Response = true
+	}
+	return m
+}
+
+// questionName returns the qname for logging without panicking on malformed messages.
+func questionName(m *dns.Msg) string {
+	if m == nil || len(m.Question) == 0 {
+		return "."
+	}
+	return m.Question[0].Name
+}
 
 // newRRSIG returns a new RRSIG, with all fields filled out, except the signed data.
 func (k *DNSKEY) newRRSIG(signerName string, ttl, incep, expir uint32) *dns.RRSIG {
@@ -17,6 +40,37 @@ func (k *DNSKEY) newRRSIG(signerName string, ttl, incep, expir uint32) *dns.RRSI
 	sig.Expiration = expir
 
 	return sig
+}
+
+// signRRSet signs rrs and returns the RRSIG. When wildcard is not empty, rrs was
+// synthesized from that wildcard owner for the name it currently carries. The
+// signature is then computed over the wildcard owner, so the RRSIG's Labels field is
+// smaller than the owner's label count, as RFC 4034 section 3.1.3 requires. The
+// RRSIG owner name itself stays the synthesized name.
+func (k *DNSKEY) signRRSet(rrs []dns.RR, signerName string, ttl, incep, expir uint32, wildcard string) (*dns.RRSIG, error) {
+	if wildcard == "" {
+		sig := k.newRRSIG(signerName, ttl, incep, expir)
+		if err := sig.Sign(k.s, rrs); err != nil {
+			return nil, err
+		}
+		return sig, nil
+	}
+
+	owner := rrs[0].Header().Name
+	copied := make([]dns.RR, len(rrs))
+	for i := range rrs {
+		copied[i] = dns.Copy(rrs[i])
+		copied[i].Header().Name = wildcard
+	}
+
+	sig := k.newRRSIG(signerName, ttl, incep, expir)
+	if err := sig.Sign(k.s, copied); err != nil {
+		return nil, err
+	}
+	// Sign derives the RRSIG owner from the RRset; for a wildcard expansion the
+	// RRSIG must be served under the queried name.
+	sig.Hdr.Name = owner
+	return sig, nil
 }
 
 type rrset struct {

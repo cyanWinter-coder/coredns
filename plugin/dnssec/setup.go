@@ -27,6 +27,10 @@ func setup(c *caddy.Controller) error {
 	}
 
 	ca := cache.New[[]dns.RR](capacity)
+	// The metadata cache tracks the TTL and signer of each signature cache entry; it
+	// has to be shared with the periodic cleaner. There is one plugin instance per
+	// server block.
+	meta := cache.New[cacheMeta](capacity)
 	stop := make(chan struct{})
 
 	c.OnShutdown(func() error {
@@ -34,12 +38,12 @@ func setup(c *caddy.Controller) error {
 		return nil
 	})
 	c.OnStartup(func() error {
-		go periodicClean(ca, stop)
+		go periodicClean(ca, stop, meta)
 		return nil
 	})
 
 	dnsserver.GetConfig(c).AddPlugin(func(next plugin.Handler) plugin.Handler {
-		return New(zones, keys, splitkeys, next, ca)
+		return newWithMeta(zones, keys, splitkeys, next, ca, meta)
 	})
 
 	return nil
